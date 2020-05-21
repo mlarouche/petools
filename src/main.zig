@@ -41,7 +41,7 @@ pub const Characterics = packed struct {
     bytes_reversed_hi: bool = false,
 };
 
-pub const MachineType = enum(u16) {
+pub const MachineType = packed enum(u16) {
     Unknown = 0x0,
     AM33 = 0x1d3,
     AMD64 = 0x8664,
@@ -67,10 +67,9 @@ pub const MachineType = enum(u16) {
     SH5 = 0x1a8,
     Thumb = 0x1c2,
     WCEMIPSV2 = 0x169,
-    _,
 };
 
-pub const Subsystem = packed enum {
+pub const Subsystem = packed enum(u16) {
     /// An unknown subsystem
     Unknown = 0,
     /// Device drivers and native Windows processes
@@ -101,11 +100,11 @@ pub const Subsystem = packed enum {
     WindowsBootApplication = 16,
 };
 
-const DOSSignature = [2]u8{ 'M', 'Z' };
+const DOSMagic = [2]u8{ 'M', 'Z' };
 
 pub const DOSHeader = packed struct {
     /// This is the "magic number" of an EXE file. The first byte of the file is 0x4d and the second is 0x5a.
-    signature: [2]u8,
+    magic: [2]u8,
     /// The number of bytes in the last block of the program that are actually used. If this value is zero, that means the entire last block is used.
     bytes_last_block: u16,
     /// Number of blocks in the file that are part of the EXE file. If [02-03] is non-zero, only that much of the last block is used.
@@ -160,11 +159,121 @@ pub const COFFHeader = packed struct {
     characteristics: Characterics,
 };
 
-const PESignature = [4]u8{ 'P', 'E', 0, 0 };
+pub const OptionalHeaderMagic = packed enum(u16) {
+    /// 32-bit executable
+    Nt32 = 0x10b,
+    /// 64-bit executable
+    Header64 = 0x20b,
+    /// ROM image
+    ROM = 0x107,
+};
 
-pub const PEHeader = packed struct {
-    signature: [4]u8,
-    coff: COFFHeader,
+pub const DataDirectory = packed struct {
+    virtual_address: u32,
+    size: u32,
+};
+
+const ImageNumberOfDirectoryEntries = 16;
+
+pub const OptionalHeader32 = packed struct {
+    magic: OptionalHeaderMagic,
+    major_linker_version: u8,
+    minor_linker_version: u8,
+    sizeof_code: u32,
+    sizeof_initialized_data: u32,
+    sizeof_uninitialized_data: u32,
+    address_of_entry_point: u32,
+    base_of_code: u32,
+    base_of_data: u32,
+    image_base: u32,
+    section_alignment: u32,
+    file_alignment: u32,
+    major_operating_system_version: u16,
+    minor_operating_system_version: u16,
+    major_image_version: u16,
+    minor_image_version: u16,
+    major_subsystem_version: u16,
+    minor_subsystem_version: u16,
+    win32_version_value: u32 = 0,
+    sizeof_image: u32,
+    sizeof_header: u32,
+    checksum: u32,
+    subsystem: Subsystem,
+    dll_characteristics: u16,
+    sizeof_stack_reverse: u32,
+    sizeof_stack_commit: u32,
+    sizeof_heap_reserve: u32,
+    sizeof_heap_commit: u32,
+    loader_flags: u32,
+    number_of_rva_and_sizes: u32,
+    data_directory: [ImageNumberOfDirectoryEntries]DataDirectory,
+};
+
+pub const OptionalHeader64 = packed struct {
+    magic: OptionalHeaderMagic,
+    major_linker_version: u8,
+    minor_linker_version: u8,
+    sizeof_code: u32,
+    sizeof_initialized_data: u32,
+    sizeof_uninitialized_data: u32,
+    address_of_entry_point: u32,
+    base_of_code: u32,
+    image_base: u64,
+    section_alignment: u32,
+    file_alignment: u32,
+    major_operating_system_version: u16,
+    minor_operating_system_version: u16,
+    major_image_version: u16,
+    minor_image_version: u16,
+    major_subsystem_version: u16,
+    minor_subsystem_version: u16,
+    win32_version_value: u32 = 0,
+    sizeof_image: u32,
+    sizeof_header: u32,
+    checksum: u32,
+    subsystem: Subsystem,
+    dll_characteristics: u16,
+    sizeof_stack_reverse: u64,
+    sizeof_stack_commit: u64,
+    sizeof_heap_reserve: u64,
+    sizeof_heap_commit: u64,
+    loader_flags: u32,
+    number_of_rva_and_sizes: u32,
+    data_directory: [ImageNumberOfDirectoryEntries]DataDirectory,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(DOSHeader) == 64);
+    std.debug.assert(@sizeOf(COFFHeader) == 20);
+    std.debug.assert(@sizeOf(OptionalHeader32) == 224);
+    std.debug.assert(@sizeOf(OptionalHeader64) == 240);
+}
+
+const PEMagic = [4]u8{ 'P', 'E', 0, 0 };
+
+fn peHeader(comptime OptionalType: type) type {
+    return struct {
+        coff: COFFHeader,
+        optional: OptionalType,
+    };
+}
+
+pub const PEHeader32 = peHeader(OptionalHeader32);
+pub const PEHeader64 = peHeader(OptionalHeader64);
+
+fn peFile(comptime PEHeaderType: type) type {
+    return struct {
+        dos_header: DOSHeader,
+        pe_header: PEHeaderType,
+    };
+}
+
+pub const PEFile32 = peFile(PEHeader32);
+pub const PEFile64 = peFile(PEHeader64);
+
+pub const PEFile = union(enum) {
+    pe32: PEFile32,
+    pe64: PEFile64,
 };
 
 pub fn main() anyerror!void {
@@ -180,8 +289,6 @@ pub fn main() anyerror!void {
 
     const full_path = try std.fs.path.resolve(std.heap.page_allocator, &[_][]u8{args[1]});
 
-    std.debug.warn("Input: {}\n", .{full_path});
-
     var file = try cwd.openFile(full_path, .{});
 
     var in_stream = file.inStream();
@@ -189,21 +296,49 @@ pub fn main() anyerror!void {
 
     const dos_header = try in_stream.readStruct(DOSHeader);
 
-    if (!std.mem.eql(u8, dos_header.signature[0..], DOSSignature[0..])) {
+    if (!std.mem.eql(u8, dos_header.magic[0..], DOSMagic[0..])) {
         std.debug.warn("Not a valid DOS program!\n", .{});
         return;
     }
 
     try seek_stream.seekTo(dos_header.pe_offset);
 
-    const pe_header = try in_stream.readStruct(PEHeader);
+    var pe_magic: [4]u8 = undefined;
+    _ = try in_stream.read(pe_magic[0..]);
 
-    if (!std.mem.eql(u8, pe_header.signature[0..], PESignature[0..])) {
+    const coff_header = try in_stream.readStruct(COFFHeader);
+
+    if (!std.mem.eql(u8, pe_magic[0..], PEMagic[0..])) {
         std.debug.warn("Not a valid PE image file\n", .{});
         return;
     }
 
+    const optional_header_size = coff_header.sizeof_optional_header;
+
     std.debug.warn("DOS:\n{}\n", .{dos_header});
-    std.debug.warn("PE:\n{}\n", .{pe_header});
-    std.debug.warn("Machine Type: {}\n", .{std.meta.tagName(pe_header.coff.machine_type)});
+    std.debug.warn("COFF:\n{}\n", .{coff_header});
+    std.debug.warn("Machine Type: {}\n", .{std.meta.tagName(coff_header.machine_type)});
+
+    if (optional_header_size == @sizeOf(OptionalHeader32)) {
+        std.debug.warn("PE/COFF x86 executable\n", .{});
+        var pe_file: PEFile32 = undefined;
+
+        pe_file.dos_header = dos_header;
+
+        pe_file.pe_header.coff = coff_header;
+        pe_file.pe_header.optional = try in_stream.readStruct(OptionalHeader32);
+
+        std.debug.warn("\nOptional: {}\n", .{pe_file.pe_header.optional});
+    } else if (optional_header_size == @sizeOf(OptionalHeader64)) {
+        std.debug.warn("PE/COFF x86-64 executable\n", .{});
+
+        var pe_file: PEFile64 = undefined;
+
+        pe_file.dos_header = dos_header;
+
+        pe_file.pe_header.coff = coff_header;
+        pe_file.pe_header.optional = try in_stream.readStruct(OptionalHeader64);
+
+        std.debug.warn("\nOptional: {}\n", .{pe_file.pe_header.optional});
+    }
 }
