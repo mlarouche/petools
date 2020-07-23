@@ -11,7 +11,7 @@
             "program": "zig-cache/bin/petools.exe",
             "preLaunchTask": "Build",
             "args": [
-                "${workspaceFolder}/tests/foobar2000.exe"
+                "${workspaceFolder}/tests/helloworld.exe"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
